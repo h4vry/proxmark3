@@ -14,6 +14,8 @@
 #include "apps.h"
 #include "string.h"
 #include "util.h"
+#include "usb_cmd.h"
+#include "usb_cdc.h"
 
 // BigBuf is the large multi-purpose buffer, typically used to hold A/D samples or traces.
 // Also used to hold various smaller buffers and the Mifare Emulator Memory.
@@ -228,6 +230,78 @@ bool RAMFUNC LogTrace(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_
 			}
 		}
 	}
+
+	return true;
+}
+
+
+/**
+    Implemented as part of "RFID communication eavesdropping thesis" by Jan Havránek
+    Inspired by the style of LogTrace function above.
+ **/
+bool RAMFUNC LogTraceRealtime(const uint8_t *btBytes, uint16_t iLen, uint32_t timestamp_start, uint32_t timestamp_end, uint8_t *parity, bool readerToTag) {
+	// Traceformat:
+	// 16 bits total trace length (little endian), only the following data, excluding this length value
+	// 32 bits timestamp (little endian)
+	// 16 bits duration (little endian)
+	// 16 bits data length (little endian, Highest Bit used as readerToTag flag)
+	// data data
+	// parity (one byte per 8 bytes of data)
+
+	uint32_t parityLen = (iLen-1)/8 + 1;
+	uint32_t duration = timestamp_end - timestamp_start;
+
+	uint16_t totalTraceLen = 4 + 2 + 2 + iLen + parityLen;
+	uint32_t len = 0;
+
+	uint8_t trace[totalTraceLen];
+
+	trace[len++] = ((CMD_ISO_14443A_REALTIME_TRACE >> 0) & 0xff);
+	trace[len++] = ((CMD_ISO_14443A_REALTIME_TRACE >> 8) & 0xff);
+
+	trace[len++] = ((totalTraceLen >> 0) & 0xff);
+	trace[len++] = ((totalTraceLen >> 8) & 0xff);
+
+	// timestamp (start)
+	trace[len++] = ((timestamp_start >> 0) & 0xff);
+	trace[len++] = ((timestamp_start >> 8) & 0xff);
+	trace[len++] = ((timestamp_start >> 16) & 0xff);
+	trace[len++] = ((timestamp_start >> 24) & 0xff);
+
+	// duration
+	trace[len++] = ((duration >> 0) & 0xff);
+	trace[len++] = ((duration >> 8) & 0xff);
+
+	// data length
+	trace[len++] = ((iLen >> 0) & 0xff);
+	trace[len++] = ((iLen >> 8) & 0xff);
+
+	// readerToTag flag
+	if (!readerToTag) {
+		trace[len - 1] |= 0x80;
+	}
+
+	// data bytes
+	if (btBytes != NULL && iLen != 0) {
+		for (int i = 0; i < iLen; i++) {
+			trace[len++] = *btBytes++;
+		}
+	}
+
+	// parity bytes
+	if (parityLen != 0) {
+		if (parity != NULL) {
+			for (int i = 0; i < parityLen; i++) {
+				trace[len++] = *parity++;
+			}
+		} else {
+			for (int i = 0; i < parityLen; i++) {
+				trace[len++] = 0x00;
+			}
+		}
+	}
+
+	usb_write(trace, len);
 
 	return true;
 }

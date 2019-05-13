@@ -597,8 +597,11 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 	uint8_t *receivedResponse = BigBuf_malloc(MAX_FRAME_SIZE);
 	uint8_t *receivedResponsePar = BigBuf_malloc(MAX_PARITY_SIZE);
 
+	bool realtime = param & 0x04;
+	int register dmaBufferSize = DMA_BUFFER_SIZE + realtime * 16256;
+
 	// The DMA buffer, used to stream samples from the FPGA
-	uint8_t *dmaBuf = BigBuf_malloc(DMA_BUFFER_SIZE);
+	uint8_t *dmaBuf = BigBuf_malloc(dmaBufferSize);
 
 	// init trace buffer
 	clear_trace();
@@ -618,13 +621,16 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 	UartInit(receivedCmd, receivedCmdPar);
 
 	// Setup and start DMA.
-	FpgaSetupSscDma((uint8_t *)dmaBuf, DMA_BUFFER_SIZE);
+	FpgaSetupSscDma((uint8_t *)dmaBuf, dmaBufferSize);
 
 	// We won't start recording the frames that we acquire until we trigger;
 	// a good trigger condition to get started is probably when we see a
 	// response from the tag.
 	// triggered == false -- to wait first for card
 	bool triggered = !(param & 0x03);
+
+	bool (*Trace)(const uint8_t *, uint16_t, uint32_t, uint32_t, uint8_t *, bool);
+	Trace = realtime ? &LogTraceRealtime : &LogTrace;
 
 	// And now we loop, receiving samples.
 	for (uint32_t rsamples = 0; true; ) {
@@ -641,12 +647,12 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 		if (readBufDataP <= dmaBufDataP){
 			dataLen = dmaBufDataP - readBufDataP;
 		} else {
-			dataLen = DMA_BUFFER_SIZE - readBufDataP + dmaBufDataP;
+			dataLen = dmaBufferSize - readBufDataP + dmaBufDataP;
 		}
 		// test for length of buffer
 		if(dataLen > maxDataLen) {
 			maxDataLen = dataLen;
-			if(dataLen > (9 * DMA_BUFFER_SIZE / 10)) {
+			if(dataLen > (9 * dmaBufferSize / 10)) {
 				Dbprintf("blew circular buffer! dataLen=%d", dataLen);
 				break;
 			}
@@ -656,13 +662,13 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 		// primary buffer was stopped( <-- we lost data!
 		if (!AT91C_BASE_PDC_SSC->PDC_RCR) {
 			AT91C_BASE_PDC_SSC->PDC_RPR = (uint32_t) dmaBuf;
-			AT91C_BASE_PDC_SSC->PDC_RCR = DMA_BUFFER_SIZE;
+			AT91C_BASE_PDC_SSC->PDC_RCR = dmaBufferSize;
 			Dbprintf("RxEmpty ERROR!!! data length:%d", dataLen); // temporary
 		}
 		// secondary buffer sets as primary, secondary buffer was stopped
 		if (!AT91C_BASE_PDC_SSC->PDC_RNCR) {
 			AT91C_BASE_PDC_SSC->PDC_RNPR = (uint32_t) dmaBuf;
-			AT91C_BASE_PDC_SSC->PDC_RNCR = DMA_BUFFER_SIZE;
+			AT91C_BASE_PDC_SSC->PDC_RNCR = dmaBufferSize;
 		}
 
 		if (rsamples & 0x01) {              // Need two samples to feed Miller and Manchester-Decoder
@@ -675,7 +681,7 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 						triggered = true;
 					}
 					if(triggered) {
-						if (!LogTrace(receivedCmd,
+						if (!Trace(receivedCmd,
 										Uart.len,
 										Uart.startTime*16 - DELAY_READER_AIR2ARM_AS_SNIFFER,
 										Uart.endTime*16 - DELAY_READER_AIR2ARM_AS_SNIFFER,
@@ -693,8 +699,9 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 
 			if (!ReaderIsActive) {      // no need to try decoding tag data if the reader is sending - and we cannot afford the time
 				uint8_t tagdata = (previous_data << 4) | (*data & 0x0F);
+
 				if (ManchesterDecoding(tagdata, 0, (rsamples-1)*4)) {
-					if (!LogTrace(receivedResponse,
+					if (!Trace(receivedResponse,
 									Demod.len,
 									Demod.startTime*16 - DELAY_TAG_AIR2ARM_AS_SNIFFER,
 									Demod.endTime*16 - DELAY_TAG_AIR2ARM_AS_SNIFFER,
@@ -713,7 +720,7 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 		previous_data = *data;
 		rsamples++;
 		data++;
-		if(data == dmaBuf + DMA_BUFFER_SIZE) {
+		if(data == dmaBuf + dmaBufferSize) {
 			data = dmaBuf;
 		}
 	} // main cycle
@@ -724,6 +731,11 @@ void RAMFUNC SnoopIso14443a(uint8_t param) {
 	DbpString("COMMAND FINISHED");
 	Dbprintf("maxDataLen=%d, Uart.state=%x, Uart.len=%d", maxDataLen, Uart.state, Uart.len);
 	Dbprintf("traceLen=%d, Uart.output[0]=%08x", BigBuf_get_traceLen(), (uint32_t)Uart.output[0]);
+
+	if (realtime) {
+		uint8_t status[] = {0xad, 0xde};
+		usb_write(status, 2);
+	}
 }
 
 //-----------------------------------------------------------------------------
